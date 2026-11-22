@@ -20,7 +20,7 @@ ALLEYVERB loads your impulse responses (WAV) or runs 12 built-in algorithms. THE
 
 Windows 64-bit, VST3. Built and tested in FL Studio.
 
-1. Download `AlleyVerb-v0.6.0-win64.zip` from [Releases](../../releases/latest).
+1. Download `AlleyVerb-v0.6.1-win64.zip` from [Releases](../../releases/latest).
 2. Copy `AlleyVerb.vst3` into `C:\Program Files\Common Files\VST3\`.
 3. Copy the files in `presets` into `Documents\Awknode\Presets\AlleyVerb\` (create the folder if it doesn't exist).
 4. Rescan plugins in your DAW.
@@ -33,11 +33,11 @@ The full control reference is in the **[manual](docs/MANUAL.md)**.
 
 ## Build from source
 
-You'll need Docker. Clone this repo next to the [nih-plug-awk](https://github.com/awknode/nih-plug-awk) framework fork, then run the build script:
+You'll need Docker. Clone this repo next to the [nice-plug-awk](https://github.com/awknode/nice-plug-awk) framework fork, then run the build script:
 
 ```sh
 git clone https://github.com/awknode/alleyverb
-git clone -b awk-studios https://github.com/awknode/nih-plug-awk
+git clone -b awk-studios https://github.com/awknode/nice-plug-awk
 cd alleyverb && ./build.sh
 ```
 
@@ -45,8 +45,8 @@ The plugin lands in `target/bundled/AlleyVerb.vst3`.
 
 ## License
 
-GPL-3.0. See [LICENSE](LICENSE). Built with [nih-plug](https://github.com/robbert-vdh/nih-plug).
+GPL-3.0. See [LICENSE](LICENSE). Built with [nice-plug](https://codeberg.org/RustAudio/nice-plug).
 
 ---
 
-More awk studios plugins: [VISE](https://github.com/awknode/vise) · [SALVE](https://github.com/awknode/salve) · [HOIST](https://github.com/awknode/hoist) · [KILN](https://github.com/awknode/kiln) · [PATINA](https://github.com/awknode/patina) · [CHOPSHOP](https://github.com/awknode/chopshop) · [THROWBACK](https://github.com/awknode/throwback) · [THROW FX](https://github.com/awknode/throw-fx) · [KICKNULL](https://github.com/awknode/kicknull) · [WAVETAG](https://github.com/awknode/wavetag)
+More awk studios plugins: [VISE](https://github.com/awknode/vise) · [SALVE](https://github.com/awknode/salve) · [HOIST](https://github.com/awknode/hoist) · [KILN](https://github.com/awknode/kiln) · [PATINA](https://github.com/awknode/patina) · [CHOPSHOP](https://github.com/awknode/chopshop) · [THROWBACK](https://github.com/awknode/throwback) · [THROW FX](https://github.com/awknode/throw-fx) · [KICKNULL](https://github.com/awknode/kicknull) · [WAVETAG](https://github.com/awknode/wavetag) · [dBCOMP](https://github.com/awknode/dbcomp) · [dBVOX](https://github.com/awknode/dbvox)
