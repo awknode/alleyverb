@@ -10,8 +10,8 @@
 //! reported latency) with everything above; bypass = the aligned untouched input.
 
 use crossbeam::queue::ArrayQueue;
-use nih_plug::prelude::*;
-use nih_plug_egui::EguiState;
+use nice_plug::prelude::*;
+use nice_plug_egui::EguiEditorState;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
@@ -19,7 +19,9 @@ use std::sync::{Arc, Mutex, RwLock};
 pub mod algo;
 mod awk_ui;
 pub mod conv;
+
 mod editor;
+mod nice_app;
 #[cfg(test)]
 mod shot;
 mod presets;
@@ -132,8 +134,8 @@ pub struct Shared {
 
 #[derive(Params)]
 pub struct AlleyParams {
-    #[persist = "editor-state-v3"]
-    pub editor_state: Arc<EguiState>,
+    /// window size (nice-plug keeps hosts in charge of it; not persisted)
+    pub editor_state: Arc<EguiEditorState>,
     #[persist = "ir-path"]
     pub ir_path: Arc<RwLock<String>>,
 
@@ -276,7 +278,7 @@ fn hz(name: &str, default: f32, min: f32, max: f32, off_low: bool) -> FloatParam
 impl Default for AlleyParams {
     fn default() -> Self {
         Self {
-            editor_state: EguiState::from_size(editor::WIDTH, editor::HEIGHT),
+            editor_state: EguiEditorState::from_size(nice_plug::editor::dpi::LogicalSize::new((editor::WIDTH) as f64, (editor::HEIGHT) as f64), 1.0),
             ir_path: Arc::new(RwLock::new(String::new())),
             dry: db("Dry", 0.0, -60.0, 6.0),
             wet: db("Wet", -6.0, -60.0, 6.0),
@@ -554,6 +556,7 @@ impl Plugin for AlleyVerb {
             ..AudioIOLayout::const_default()
         },
     ];
+    type Editor = crate::nice_app::AwkEditor;
     type SysExMessage = ();
     type BackgroundTask = Task;
 
@@ -569,7 +572,7 @@ impl Plugin for AlleyVerb {
         })
     }
 
-    fn editor(&mut self, _async_executor: AsyncExecutor<Self>) -> Option<Box<dyn Editor>> {
+    fn editor(&mut self, _async_executor: AsyncExecutor<Self>) -> Option<Self::Editor> {
         // The editor must NOT keep the AsyncExecutor: it holds a strong ref to
         // nih-plug's wrapper, which owns the editor -> a cycle that is never
         // freed, so nih-plug's hidden message window outlived the DLL and FL
@@ -578,7 +581,7 @@ impl Plugin for AlleyVerb {
         editor::create(self.params.clone(), self.shared.clone())
     }
 
-    fn initialize(&mut self, _l: &AudioIOLayout, cfg: &BufferConfig, context: &mut impl InitContext<Self>) -> bool {
+    fn activate(&mut self, _l: &AudioIOLayout, cfg: &BufferConfig, context: &mut impl ActivateContext<Self>) -> bool {
         self.sr = cfg.sample_rate;
         self.shared.sr.store(self.sr.to_bits(), Ordering::Relaxed);
         let pre_len = (MAX_PREDELAY_MS * 0.001 * self.sr) as usize + 2;
@@ -1004,8 +1007,8 @@ impl Vst3Plugin for AlleyVerb {
     const VST3_SUBCATEGORIES: &'static [Vst3SubCategory] = &[Vst3SubCategory::Fx, Vst3SubCategory::Reverb];
 }
 
-nih_export_clap!(AlleyVerb);
-nih_export_vst3!(AlleyVerb);
+nice_export_clap!(AlleyVerb);
+nice_export_vst3!(AlleyVerb);
 
 #[cfg(test)]
 mod dump_defaults;

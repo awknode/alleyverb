@@ -17,9 +17,9 @@ use crate::conv::BLOCK;
 use crate::fx::{response_db, swell_lookahead};
 use crate::presets::PresetBar;
 use crate::{favorites_file, ir_roots, load_task, AlleyParams, Shared, DUCK_SOURCES, HIGH_CUT_OFF, LOW_CUT_OFF, PRE_DIVS};
-use nih_plug::prelude::*;
-use nih_plug_egui::create_egui_editor;
-use nih_plug_egui::egui::{self, pos2, vec2, Align2, Color32, Key, Painter, Pos2, Rect, Sense, Stroke, Vec2};
+use nice_plug::prelude::*;
+use nice_plug_egui::create_egui_editor;
+use egui::{pos2, vec2, Align2, Color32, Key, Painter, Pos2, Rect, Sense, Stroke, Vec2};
 use realfft::{num_complex::Complex, RealFftPlanner, RealToComplex};
 use std::collections::BTreeSet;
 use std::path::PathBuf;
@@ -210,7 +210,7 @@ impl Drop for Loader {
     }
 }
 
-pub fn create(params: Arc<AlleyParams>, shared: Arc<Shared>) -> Option<Box<dyn Editor>> {
+pub fn create(params: Arc<AlleyParams>, shared: Arc<Shared>) -> Option<crate::nice_app::AwkEditor> {
     let state = params.editor_state.clone();
     let fft = RealFftPlanner::<f32>::new().plan_fft_forward(FFT);
     let ui_state = Ui {
@@ -234,12 +234,13 @@ pub fn create(params: Arc<AlleyParams>, shared: Arc<Shared>) -> Option<Box<dyn E
     let skin = Skin::new(Look::Hud, ACC, "ALLEYVERB", env!("CARGO_PKG_VERSION"), "IMPULSE + ALGO // FREEZE // SHIMMER // RISER + SWELL // DUCK");
     // Owned by the update closure below, so it lives exactly as long as the editor.
     let loader = Loader::new(params.clone(), shared.clone());
-    create_egui_editor(
-        state,
-        (ui_state, skin),
-        |ctx, _| install_fonts(ctx),
-        move |ctx, setter, state| frame(ctx, setter, state, &params, &shared, &loader),
-    )
+    create_egui_editor(state, nice_plug_egui::RepaintNotifier::new(), nice_plug_egui::EguiNiceSettings::default(), crate::nice_app::AwkApp::new(install_fonts, {
+        let mut __st = (ui_state, skin);
+        Box::new(move |ctx: &mut egui::Ui, setter: &ParamSetter| {
+            let state = &mut __st;
+            frame(ctx, setter, state, &params, &shared, &loader)
+        })
+    }))
 }
 
 /// Left-bottom text, squeezed to fit `max_w` by dropping characters.
@@ -260,7 +261,7 @@ fn fit_txt(p: &Painter, pos: Pos2, s: &str, font: egui::FontId, col: Color32, sp
 
 fn freeze_button(ui: &mut egui::Ui, setter: &ParamSetter, r: Rect, param: &BoolParam) {
     let on = param.value();
-    let resp = ui.interact(r, ui.id().with("freeze"), Sense::click());
+    let resp = ui.interact(r, ui.scope_id().with("freeze"), Sense::click());
     if resp.clicked() {
         setter.begin_set_parameter(param);
         setter.set_parameter(param, !on);
@@ -377,7 +378,7 @@ fn impulse_browser(ui: &mut egui::Ui, painter: &Painter, skin: &Skin, stash: Rec
     let search_r = Rect::from_min_max(pos2(stash.left() + 204.0, stash.top() + 8.0), pos2(stash.right() - 12.0, stash.top() + 30.0));
     cham_fill(painter, search_r, 5.0, 5.0, Color32::from_rgba_unmultiplied(3, 10, 18, 230), Stroke::new(1.0_f32, al(CY, 0.35)));
     let total = st.items.len();
-    ui.allocate_new_ui(egui::UiBuilder::new().max_rect(search_r.shrink2(vec2(8.0, 3.0))), |ui| {
+    ui.scope_builder(egui::UiBuilder::new().max_rect(search_r.shrink2(vec2(8.0, 3.0))), |ui| {
         let v = ui.visuals_mut();
         v.extreme_bg_color = Color32::TRANSPARENT;
         v.widgets.inactive.bg_stroke = Stroke::NONE;
@@ -387,7 +388,7 @@ fn impulse_browser(ui: &mut egui::Ui, painter: &Painter, skin: &Skin, stash: Rec
         v.text_cursor.stroke = Stroke::new(1.5_f32, ACC);
         ui.add(
             egui::TextEdit::singleline(&mut st.search)
-                .frame(false)
+                .frame(egui::Frame::NONE)
                 .hint_text(egui::RichText::new(format!("search {total} impulses: hall, dark, vocal...")).color(al(rgb(0x8f, 0xc9, 0xe3), 0.6)))
                 .text_color(rgb(0xe6, 0xf8, 0xff))
                 .desired_width(search_r.width() - 16.0)
@@ -400,7 +401,7 @@ fn impulse_browser(ui: &mut egui::Ui, painter: &Painter, skin: &Skin, stash: Rec
     let list_rect = Rect::from_min_max(pos2(stash.left() + 186.0, stash.top() + 40.0), stash.right_bottom() - vec2(10.0, 10.0));
     line(painter, pos2(stash.left() + 179.0, cat_rect.top()), pos2(stash.left() + 179.0, cat_rect.bottom()), al(CY, 0.2), 1.0);
     let mut pick_cat = None;
-    ui.allocate_new_ui(egui::UiBuilder::new().max_rect(cat_rect), |ui| {
+    ui.scope_builder(egui::UiBuilder::new().max_rect(cat_rect), |ui| {
         egui::ScrollArea::vertical().id_salt("cats").show(ui, |ui| {
             let favn = st.items.iter().filter(|i| st.favs.contains(&i.key)).count();
             if row(ui, &format!("★ FAVOURITES  {favn}"), !searching && st.cat == FAV_CAT, false, None).0 {
@@ -422,7 +423,7 @@ fn impulse_browser(ui: &mut egui::Ui, painter: &Painter, skin: &Skin, stash: Rec
     let list = visible(st);
     let mut pick = None;
     let mut fav_toggle = None;
-    ui.allocate_new_ui(egui::UiBuilder::new().max_rect(list_rect), |ui| {
+    ui.scope_builder(egui::UiBuilder::new().max_rect(list_rect), |ui| {
         egui::ScrollArea::vertical().id_salt(("files", st.cat, searching)).show(ui, |ui| {
             if list.is_empty() {
                 ui.label(egui::RichText::new(if st.cat == FAV_CAT && !searching { "Click the ☆ next to an impulse to favourite it" } else { "Nothing matches" }).font(mono(10.0)).color(al(rgb(0x8f, 0xc9, 0xe3), 0.7)));
@@ -628,7 +629,9 @@ fn draw_spectrum(painter: &Painter, skin: &Skin, r: Rect, st: &Ui, params: &Alle
 }
 
 /// One editor frame (pulled out of the update closure so tests can render it).
-fn frame(ctx: &egui::Context, setter: &ParamSetter, state: &mut (Ui, Skin), params: &Arc<AlleyParams>, shared: &Arc<Shared>, loader: &Loader) {
+fn frame(root: &mut egui::Ui, setter: &ParamSetter, state: &mut (Ui, Skin), params: &Arc<AlleyParams>, shared: &Arc<Shared>, loader: &Loader) {
+    let ctx_owned = root.ctx().clone();
+    let ctx = &ctx_owned;
             let (st, skin) = (&mut state.0, &mut state.1);
             ctx.request_repaint_after(std::time::Duration::from_millis(33));
             skin.begin(ctx);
@@ -652,7 +655,7 @@ fn frame(ctx: &egui::Context, setter: &ParamSetter, state: &mut (Ui, Skin), para
             pump_spectrum(st, &shared, sr);
             let algo = p.engine.value() == 1;
 
-            egui::CentralPanel::default().frame(egui::Frame::NONE.fill(rgb(0x04, 0x07, 0x0c))).show(ctx, |ui| {
+            egui::CentralPanel::default().frame(egui::Frame::NONE.fill(rgb(0x04, 0x07, 0x0c))).show(root, |ui| {
                 let whole = ui.max_rect();
                 skin.background(ui.painter(), whole);
                 let full = st.presets.strip(ui, setter, params.as_ref(), whole, skin, &p.mix, &p.bypass);
@@ -735,7 +738,7 @@ fn frame(ctx: &egui::Context, setter: &ParamSetter, state: &mut (Ui, Skin), para
                         go = step(1);
                     }
                     // Arrow keys step too (when not typing in the search box).
-                    if !ctx.wants_keyboard_input() {
+                    if !ctx.egui_wants_keyboard_input() {
                         if ui.input(|i| i.key_pressed(Key::ArrowDown) || i.key_pressed(Key::ArrowRight)) {
                             go = step(1);
                         } else if ui.input(|i| i.key_pressed(Key::ArrowUp) || i.key_pressed(Key::ArrowLeft)) {
@@ -938,7 +941,7 @@ mod shot_tests {
         let mut texs = HashMap::new();
         let mut out = None;
         for i in 0..4 {
-            out = Some(ctx.run(raw(i, vec![]), |c| frame(c, &setter, &mut state, &params, &shared, &loader)));
+            out = Some(ctx.run_ui(raw(i, vec![]), |c| frame(c, &setter, &mut state, &params, &shared, &loader)));
             if i < 3 { apply_delta(&mut texs, out.as_ref().unwrap()); }
         }
         render(&ctx, out.unwrap(), &mut texs, &format!("{dir}/alleyverb0.rgb"));
