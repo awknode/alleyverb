@@ -20,6 +20,8 @@ pub mod algo;
 mod awk_ui;
 pub mod conv;
 mod editor;
+#[cfg(test)]
+mod shot;
 mod presets;
 pub mod fx;
 #[cfg(test)]

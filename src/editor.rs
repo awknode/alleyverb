@@ -238,275 +238,7 @@ pub fn create(params: Arc<AlleyParams>, shared: Arc<Shared>) -> Option<Box<dyn E
         state,
         (ui_state, skin),
         |ctx, _| install_fonts(ctx),
-        move |ctx, setter, state| {
-            let (st, skin) = (&mut state.0, &mut state.1);
-            ctx.request_repaint_after(std::time::Duration::from_millis(33));
-            skin.begin(ctx);
-            let p = &params;
-            let current = p.ir_path.read().map(|s| s.clone()).unwrap_or_default();
-            if !st.scanned {
-                scan(st);
-                if let Some(it) = st.items.iter().find(|i| i.key == current) {
-                    st.cat = it.cat;
-                }
-            }
-            let load = |path: &PathBuf| {
-                let s = path.to_string_lossy().to_string();
-                if let Ok(mut w) = p.ir_path.write() {
-                    *w = s.clone();
-                }
-                shared.loading.store(true, Ordering::Release);
-                loader.load(s);
-            };
-            let sr = f32::from_bits(shared.sr.load(Ordering::Relaxed)).max(8000.0);
-            pump_spectrum(st, &shared, sr);
-            let algo = p.engine.value() == 1;
-
-            egui::CentralPanel::default().frame(egui::Frame::NONE.fill(rgb(0x04, 0x07, 0x0c))).show(ctx, |ui| {
-                let whole = ui.max_rect();
-                skin.background(ui.painter(), whole);
-                let full = st.presets.strip(ui, setter, params.as_ref(), whole, skin, &p.mix, &p.bypass);
-                if let Some(fields) = st.presets.pending_fields.take() {
-                    if let Some(path) = fields.get("ir-path").and_then(|j| serde_json::from_str::<String>(j).ok()) {
-                        if !path.is_empty() && path != current {
-                            load(&PathBuf::from(path));
-                        }
-                    }
-                }
-                let painter = ui.painter().clone();
-                let (l, r, t) = (full.left(), full.right(), full.top());
-                let foot = Rect::from_min_max(pos2(l, full.bottom() - 30.0), full.right_bottom());
-                // Main column ends here; the meters take the strip to the right.
-                let mr = r - 100.0;
-
-                // ---- SEC.01: IMPULSE / ALGO ----
-                let stash = Rect::from_min_max(pos2(l + 16.0, t + 12.0), pos2(l + 466.0, t + 286.0));
-                skin.panel(&painter, stash, "", "");
-                for (i, label) in ["IMPULSE", "ALGO"].iter().enumerate() {
-                    let cr = Rect::from_min_size(pos2(stash.left() + 12.0 + 92.0 * i as f32, stash.top() + 8.0), vec2(86.0, 22.0));
-                    let on = (i == 1) == algo;
-                    if skin.chip(ui, cr, label, on, ("tab", i)).clicked() && !on {
-                        set_int(setter, &p.engine, i as i32);
-                    }
-                }
-                if !algo {
-                    impulse_browser(ui, &painter, skin, stash, st, &current, &load);
-                } else {
-                    algo_browser(ui, &painter, skin, stash, setter, p);
-                }
-
-                // ---- SEC.02: THE TAIL ----
-                let tail = Rect::from_min_max(pos2(stash.right() + 12.0, stash.top()), pos2(r - 16.0, stash.bottom()));
-                skin.panel(&painter, tail, "THE TAIL", "SEC.02");
-                let send_on = p.send.value();
-                // Centred in the header row, clear of the title and the SEC.02 tag.
-                let par_r = Rect::from_center_size(pos2(tail.center().x, tail.top() + 18.0), vec2(150.0, 20.0));
-                skin.chip_param(ui, setter, par_r, &p.send, ("PARALLEL: ON", "PARALLEL: OFF"))
-                    .on_hover_text(if send_on { "Original passes untouched; the reverb runs on a copy (like a send)" } else { "DRY and OUTPUT shape the original" });
-                let wave = Rect::from_min_max(pos2(tail.left() + 12.0, tail.top() + 80.0), pos2(tail.right() - 12.0, tail.top() + 220.0));
-                let by = tail.top() + 248.0;
-                let hi = rgb(0xf0, 0xfb, 0xff);
-                let dim_txt = al(rgb(0x8f, 0xc9, 0xe3), 0.75);
-                if !algo {
-                    let (name, secs, rt0, rt1, env, err) = match shared.info.lock() {
-                        Ok(i) => (i.name.clone(), i.secs, i.rt_orig, i.rt_new, i.env.clone(), i.error.clone()),
-                        Err(_) => (String::new(), 0.0, 0.0, 0.0, Vec::new(), None),
-                    };
-                    let loading = shared.loading.load(Ordering::Acquire);
-                    let cat = st.items.iter().find(|i| i.key == current).map(|i| st.cats[i.cat].clone()).unwrap_or_else(|| "IMPULSE".into());
-                    fit_txt(&painter, pos2(tail.left() + 16.0, tail.top() + 56.0), &clean_name(&name).to_uppercase(), disp(15.0), hi, 2.0, tail.width() - 32.0);
-                    txt(&painter, pos2(tail.left() + 16.0, tail.top() + 72.0), Align2::LEFT_BOTTOM, format!("{cat}  ·  {}", if p.reverse.value() { "REVERSED" } else { "FORWARD" }), mono(9.0), dim_txt, 1.0);
-                    draw_tail_ir(&painter, skin, wave, &env, secs, rt1, p.freeze.value());
-                    let sub = if loading {
-                        "LOADING...".to_string()
-                    } else if let Some(e) = err {
-                        e
-                    } else if (rt1 - rt0).abs() > 0.005 {
-                        format!("DECAY {rt0:.2} s  ›  {rt1:.2} s     TAIL {secs:.1} s")
-                    } else {
-                        format!("DECAY {rt0:.2} s     TAIL {secs:.1} s")
-                    };
-                    txt(&painter, pos2(tail.left() + 16.0, tail.top() + 238.0), Align2::LEFT_BOTTOM, sub, mono(10.0), rgb(0xcd, 0xef, 0xff), 1.0);
-                    let list = visible(st);
-                    let idx = list.iter().position(|&i| st.items[i].key == current);
-                    let step = |d: isize| -> Option<PathBuf> {
-                        if list.is_empty() {
-                            return None;
-                        }
-                        let n = list.len() as isize;
-                        let i = idx.map(|i| (i as isize + d).rem_euclid(n)).unwrap_or(0) as usize;
-                        Some(st.items[list[i]].path.clone())
-                    };
-                    let mut go = None;
-                    if skin.chip(ui, Rect::from_min_size(pos2(tail.left() + 16.0, by), vec2(64.0, 18.0)), "‹ PREV", false, "prev").clicked() {
-                        go = step(-1);
-                    }
-                    if skin.chip(ui, Rect::from_min_size(pos2(tail.left() + 86.0, by), vec2(64.0, 18.0)), "NEXT ›", false, "next").clicked() {
-                        go = step(1);
-                    }
-                    // Arrow keys step too (when not typing in the search box).
-                    if !ctx.wants_keyboard_input() {
-                        if ui.input(|i| i.key_pressed(Key::ArrowDown) || i.key_pressed(Key::ArrowRight)) {
-                            go = step(1);
-                        } else if ui.input(|i| i.key_pressed(Key::ArrowUp) || i.key_pressed(Key::ArrowLeft)) {
-                            go = step(-1);
-                        }
-                    }
-                    if let Some(f) = go {
-                        load(&f);
-                    }
-                    skin.chip_param(ui, setter, Rect::from_min_size(pos2(tail.left() + 156.0, by), vec2(110.0, 18.0)), &p.reverse, ("REVERSE: ON", "REVERSE: OFF"));
-                } else {
-                    let mode = p.algo_mode.value().clamp(0, 11) as usize;
-                    let color = COLOR_NAMES[p.algo_color.value().clamp(0, 2) as usize];
-                    txt(&painter, pos2(tail.left() + 16.0, tail.top() + 56.0), Align2::LEFT_BOTTOM, MODE_NAMES[mode], disp(15.0), hi, 2.0);
-                    fit_txt(&painter, pos2(tail.left() + 16.0, tail.top() + 72.0), &format!("{color}  ·  ALGO ENGINE  ·  {}", MODE_INFO[mode].to_uppercase()), mono(9.0), dim_txt, 1.0, tail.width() - 32.0);
-                    draw_tail_algo(&painter, skin, wave, p, mode == 11);
-                    txt(&painter, pos2(tail.left() + 16.0, tail.top() + 238.0), Align2::LEFT_BOTTOM, format!("DECAY {:.2} s     PRE-DELAY {:.0} ms", p.decay.value(), p.predelay.value()), mono(10.0), rgb(0xcd, 0xef, 0xff), 1.0);
-                    if skin.chip(ui, Rect::from_min_size(pos2(tail.left() + 16.0, by), vec2(64.0, 18.0)), "‹ PREV", false, "aprev").clicked() {
-                        set_int(setter, &p.algo_mode, ((mode + 11) % 12) as i32);
-                    }
-                    if skin.chip(ui, Rect::from_min_size(pos2(tail.left() + 86.0, by), vec2(64.0, 18.0)), "NEXT ›", false, "anext").clicked() {
-                        set_int(setter, &p.algo_mode, ((mode + 1) % 12) as i32);
-                    }
-                }
-                freeze_button(ui, setter, Rect::from_min_size(pos2(tail.right() - 138.0, tail.top() + 226.0), vec2(126.0, 40.0)), &p.freeze);
-
-                // ---- SEC.03: WHERE IT HITS ----
-                let spec = Rect::from_min_max(pos2(l + 16.0, t + 298.0), pos2(mr, t + 448.0));
-                let duck_db = f32::from_bits(shared.duck_db.load(Ordering::Relaxed));
-                draw_spectrum(&painter, skin, spec, st, p, duck_db, sr);
-
-                // ---- METERS ----
-                let mp = Rect::from_min_max(pos2(mr + 12.0, spec.top()), pos2(r - 16.0, t + 756.0));
-                skin.panel(&painter, mp, "", "");
-                let m = &shared.meters;
-                let (my, mh) = (mp.top() + 40.0, mp.height() - 66.0);
-                skin.meter(&painter, mp.left() + 9.0, my, mh, "IN", m.db(0), m.db(1), Side::Right, "in");
-                skin.meter(&painter, mp.left() + 49.0, my, mh, "OUT", m.db(2), m.db(3), Side::None, "out");
-
-                // ---- SEC.04 SPACE | SEC.05 DUCK ----
-                let space_r = Rect::from_min_max(pos2(l + 16.0, t + 460.0), pos2(l + 540.0, t + 580.0));
-                skin.panel(&painter, space_r, "SPACE", "SEC.04");
-                let ky = space_r.top() + 62.0;
-                let sx = |r: Rect, n: usize, i: usize| r.left() + r.width() * (i as f32 + 0.5) / n as f32;
-                let space: [(&str, &FloatParam, bool); 5] = [("LENGTH", &p.length, algo), ("SIZE", &p.size, false), ("DECAY", &p.decay, false), ("PRE-DELAY", &p.predelay, false), ("WIDTH", &p.width, false)];
-                for (i, (lab_, prm, dim)) in space.iter().enumerate() {
-                    skin.knob(ui, setter, pos2(sx(space_r, 5, i), ky), 20.0, lab_, *prm, false, false, *dim);
-                }
-                if !algo {
-                    skin.chip_param(ui, setter, Rect::from_min_size(pos2(space_r.left() + 94.0, space_r.top() + 6.0), vec2(158.0, 18.0)), &p.decay_orig, ("DECAY: IMPULSE'S OWN", "DECAY: SET BY KNOB"));
-                }
-                // Pre-delay tempo sync (cycles OFF, 1/64 ... 1/4D).
-                let pd = p.pre_div.value().clamp(0, 8);
-                if skin.chip(ui, Rect::from_min_size(pos2(space_r.left() + 260.0, space_r.top() + 6.0), vec2(128.0, 18.0)), &format!("PRE SYNC: {} ›", PRE_DIVS[pd as usize]), pd != 0, "prediv").clicked() {
-                    set_int(setter, &p.pre_div, (pd + 1) % 9);
-                }
-                let duck_r = Rect::from_min_max(pos2(space_r.right() + 12.0, space_r.top()), pos2(mr, space_r.bottom()));
-                skin.panel(&painter, duck_r, "DUCK", "SEC.05");
-                let duck: [(&str, &FloatParam); 3] = [("DUCK", &p.duck), ("DUCK LOW", &p.duck_lo), ("DUCK HIGH", &p.duck_hi)];
-                for (i, (lab_, prm)) in duck.iter().enumerate() {
-                    skin.knob(ui, setter, pos2(sx(duck_r, 3, i), ky), 20.0, lab_, *prm, false, false, false);
-                }
-                let src = p.duck_src.value().clamp(0, 2);
-                if skin.chip(ui, Rect::from_min_size(pos2(duck_r.left() + 76.0, duck_r.top() + 6.0), vec2(124.0, 18.0)), &format!("HEARS: {} ›", DUCK_SOURCES[src as usize]), src != 0, "ducksrc").clicked() {
-                    set_int(setter, &p.duck_src, (src + 1) % 3);
-                }
-
-                // ---- SEC.06 EXTRAS: tabbed row ----
-                let ex = Rect::from_min_max(pos2(l + 16.0, t + 592.0), pos2(mr, t + 756.0));
-                skin.panel(&painter, ex, "EXTRAS", "");
-                let ey = ex.top() + 82.0;
-                let tabs = ["ALGO", "SHIMMER", "RISER + SWELL", "INPUT EQ"];
-                for (i, tname) in tabs.iter().enumerate() {
-                    let cr = Rect::from_min_size(pos2(ex.left() + 94.0 + i as f32 * 124.0, ex.top() + 6.0), vec2(118.0, 20.0));
-                    if skin.chip(ui, cr, tname, st.extra_tab == i, ("xtab", i)).clicked() {
-                        st.extra_tab = i;
-                    }
-                    let lit = match i {
-                        1 => p.shimmer.value() > 0.0,
-                        2 => p.riser.value() > 0.0 || p.swell.value(),
-                        3 => p.in_lo.value() > LOW_CUT_OFF || p.in_hi.value() < HIGH_CUT_OFF,
-                        _ => algo,
-                    };
-                    if lit {
-                        painter.circle_filled(cr.right_top() + vec2(-6.0, 6.0), 4.5, al(ACC, 0.25));
-                        painter.circle_filled(cr.right_top() + vec2(-6.0, 6.0), 2.2, ACC);
-                    }
-                }
-                let wide = |i: usize| ex.left() + 70.0 + i as f32 * 140.0;
-                match st.extra_tab {
-                    0 => {
-                        let ak: [(&str, &FloatParam); 9] = [
-                            ("ATTACK", &p.attack),
-                            ("EARLY DIFF", &p.early_diff),
-                            ("LATE DIFF", &p.late_diff),
-                            ("MOD RATE", &p.mod_rate),
-                            ("MOD DEPTH", &p.mod_depth),
-                            ("BASS MULT", &p.bass_mult),
-                            ("BASS XOVER", &p.bass_xover),
-                            ("HIGH SHELF", &p.high_shelf),
-                            ("HIGH FREQ", &p.high_freq),
-                        ];
-                        for (i, (lab_, prm)) in ak.iter().enumerate() {
-                            skin.knob(ui, setter, pos2(sx(ex, 9, i), ey), 18.0, lab_, *prm, false, false, !algo);
-                        }
-                        if !algo {
-                            skin.small(&painter, pos2(ex.right() - 14.0, ex.top() + 16.0), Align2::RIGHT_CENTER, "ALGO ENGINE ONLY · ALGO TAB, TOP LEFT", skin.text_faint());
-                        }
-                    }
-                    1 => {
-                        let k: [(&str, &FloatParam); 4] = [("SHIMMER", &p.shimmer), ("PITCH", &p.shim_pitch), ("FEEDBACK", &p.shim_fb), ("TONE", &p.shim_tone)];
-                        for (i, (lab_, prm)) in k.iter().enumerate() {
-                            skin.knob(ui, setter, pos2(wide(i), ey), 18.0, lab_, *prm, false, false, false);
-                        }
-                    }
-                    2 => {
-                        let k: [(&str, &FloatParam); 5] = [("RISER", &p.riser), ("SWELL LENGTH", &p.swell_len), ("SWELL LEVEL", &p.swell_amt), ("SENSITIVITY", &p.swell_sens), ("CURVE", &p.swell_curve)];
-                        let swell = p.swell.value();
-                        for (i, (lab_, prm)) in k.iter().enumerate() {
-                            skin.knob(ui, setter, pos2(wide(i), ey), 18.0, lab_, *prm, false, false, i > 0 && !swell);
-                        }
-                        let pdc = swell_lookahead(sr) as f32 / sr;
-                        skin.chip_param(ui, setter, Rect::from_min_size(pos2(ex.right() - 202.0, ex.top() + 6.0), vec2(190.0, 20.0)), &p.swell, (&format!("SWELL: ON (+{pdc:.1} s PDC)"), "SWELL: OFF"));
-                    }
-                    _ => {
-                        let k: [(&str, &FloatParam); 2] = [("INPUT LOW CUT", &p.in_lo), ("INPUT HIGH CUT", &p.in_hi)];
-                        for (i, (lab_, prm)) in k.iter().enumerate() {
-                            skin.knob(ui, setter, pos2(wide(i), ey), 18.0, lab_, *prm, false, false, false);
-                        }
-                        let nx = ex.left() + 370.0;
-                        let c = rgb(0xcd, 0xef, 0xff);
-                        let d = al(rgb(0x8f, 0xc9, 0xe3), 0.75);
-                        txt(&painter, pos2(nx, ey - 26.0), Align2::LEFT_CENTER, "SHAPES WHAT GOES INTO THE REVERB", disp(8.5), c, 2.0);
-                        skin.small(&painter, pos2(nx, ey - 4.0), Align2::LEFT_CENTER, "Cut lows going in = no mud building up in the tail.", d);
-                        skin.small(&painter, pos2(nx, ey + 12.0), Align2::LEFT_CENTER, "Cut highs going in = no harsh esses or hats in the tail.", d);
-                        skin.small(&painter, pos2(nx, ey + 28.0), Align2::LEFT_CENTER, "LOW/HIGH CUT in MIX shape what comes out.", d);
-                    }
-                }
-
-                // ---- SEC.07 MIX ----
-                let mix_r = Rect::from_min_max(pos2(l + 16.0, t + 768.0), pos2(r - 16.0, foot.top() - 10.0));
-                skin.panel(&painter, mix_r, "MIX", "SEC.07");
-                let mx: [(&str, &FloatParam, bool); 5] = [
-                    (if send_on { "DRY (LOCKED)" } else { "DRY" }, &p.dry, send_on),
-                    ("WET", &p.wet, false),
-                    ("LOW CUT", &p.low_cut, false),
-                    ("HIGH CUT", &p.high_cut, false),
-                    (if send_on { "OUTPUT (REVERB)" } else { "OUTPUT" }, &p.output, false),
-                ];
-                let mky = mix_r.top() + 56.0;
-                for (i, (lab_, prm, dim)) in mx.iter().enumerate() {
-                    skin.knob(ui, setter, pos2(sx(mix_r, 5, i), mky), 26.0, lab_, *prm, true, false, *dim);
-                }
-
-                // ---- footer ----
-                let lat = BLOCK + if p.swell.value() { swell_lookahead(sr) } else { 0 };
-                skin.footer(&painter, foot, foot.left() + 300.0);
-                skin.safe_chip(ui, setter, Rect::from_center_size(pos2(foot.left() + 226.0, foot.center().y), vec2(112.0, 18.0)), &p.safe, shared.meters.db(4));
-                skin.small(&painter, pos2(foot.left() + 16.0, foot.center().y), Align2::LEFT_CENTER, format!("PDC {lat} SMP · {:.0} ms", lat as f32 / sr * 1000.0), rgb(0x9f, 0xdc, 0xf5));
-            });
-        },
+        move |ctx, setter, state| frame(ctx, setter, state, &params, &shared, &loader),
     )
 }
 
@@ -893,4 +625,322 @@ fn draw_spectrum(painter: &Painter, skin: &Skin, r: Rect, st: &Ui, params: &Alle
         x = rr.left() - 30.0;
     }
     skin.screen_end(painter, r);
+}
+
+/// One editor frame (pulled out of the update closure so tests can render it).
+fn frame(ctx: &egui::Context, setter: &ParamSetter, state: &mut (Ui, Skin), params: &Arc<AlleyParams>, shared: &Arc<Shared>, loader: &Loader) {
+            let (st, skin) = (&mut state.0, &mut state.1);
+            ctx.request_repaint_after(std::time::Duration::from_millis(33));
+            skin.begin(ctx);
+            let p = &params;
+            let current = p.ir_path.read().map(|s| s.clone()).unwrap_or_default();
+            if !st.scanned {
+                scan(st);
+                if let Some(it) = st.items.iter().find(|i| i.key == current) {
+                    st.cat = it.cat;
+                }
+            }
+            let load = |path: &PathBuf| {
+                let s = path.to_string_lossy().to_string();
+                if let Ok(mut w) = p.ir_path.write() {
+                    *w = s.clone();
+                }
+                shared.loading.store(true, Ordering::Release);
+                loader.load(s);
+            };
+            let sr = f32::from_bits(shared.sr.load(Ordering::Relaxed)).max(8000.0);
+            pump_spectrum(st, &shared, sr);
+            let algo = p.engine.value() == 1;
+
+            egui::CentralPanel::default().frame(egui::Frame::NONE.fill(rgb(0x04, 0x07, 0x0c))).show(ctx, |ui| {
+                let whole = ui.max_rect();
+                skin.background(ui.painter(), whole);
+                let full = st.presets.strip(ui, setter, params.as_ref(), whole, skin, &p.mix, &p.bypass);
+                if let Some(fields) = st.presets.pending_fields.take() {
+                    if let Some(path) = fields.get("ir-path").and_then(|j| serde_json::from_str::<String>(j).ok()) {
+                        if !path.is_empty() && path != current {
+                            load(&PathBuf::from(path));
+                        }
+                    }
+                }
+                let painter = ui.painter().clone();
+                let (l, r, t) = (full.left(), full.right(), full.top());
+                let foot = Rect::from_min_max(pos2(l, full.bottom() - 30.0), full.right_bottom());
+                // Main column ends here; the meters take the strip to the right.
+                let mr = r - 100.0;
+
+                // ---- SEC.01: IMPULSE / ALGO ----
+                let stash = Rect::from_min_max(pos2(l + 16.0, t + 12.0), pos2(l + 466.0, t + 286.0));
+                skin.panel(&painter, stash, "", "");
+                for (i, label) in ["IMPULSE", "ALGO"].iter().enumerate() {
+                    let cr = Rect::from_min_size(pos2(stash.left() + 12.0 + 92.0 * i as f32, stash.top() + 8.0), vec2(86.0, 22.0));
+                    let on = (i == 1) == algo;
+                    if skin.chip(ui, cr, label, on, ("tab", i)).clicked() && !on {
+                        set_int(setter, &p.engine, i as i32);
+                    }
+                }
+                if !algo {
+                    impulse_browser(ui, &painter, skin, stash, st, &current, &load);
+                } else {
+                    algo_browser(ui, &painter, skin, stash, setter, p);
+                }
+
+                // ---- SEC.02: THE TAIL ----
+                let tail = Rect::from_min_max(pos2(stash.right() + 12.0, stash.top()), pos2(r - 16.0, stash.bottom()));
+                skin.panel(&painter, tail, "THE TAIL", "SEC.02");
+                let send_on = p.send.value();
+                // Centred in the header row, clear of the title and the SEC.02 tag.
+                let par_r = Rect::from_center_size(pos2(tail.center().x, tail.top() + 18.0), vec2(150.0, 20.0));
+                skin.chip_param(ui, setter, par_r, &p.send, ("PARALLEL: ON", "PARALLEL: OFF"))
+                    .on_hover_text(if send_on { "Original passes untouched; the reverb runs on a copy (like a send)" } else { "DRY and OUTPUT shape the original" });
+                let wave = Rect::from_min_max(pos2(tail.left() + 12.0, tail.top() + 80.0), pos2(tail.right() - 12.0, tail.top() + 220.0));
+                let by = tail.top() + 248.0;
+                let hi = rgb(0xf0, 0xfb, 0xff);
+                let dim_txt = al(rgb(0x8f, 0xc9, 0xe3), 0.75);
+                if !algo {
+                    let (name, secs, rt0, rt1, env, err) = match shared.info.lock() {
+                        Ok(i) => (i.name.clone(), i.secs, i.rt_orig, i.rt_new, i.env.clone(), i.error.clone()),
+                        Err(_) => (String::new(), 0.0, 0.0, 0.0, Vec::new(), None),
+                    };
+                    let loading = shared.loading.load(Ordering::Acquire);
+                    let cat = st.items.iter().find(|i| i.key == current).map(|i| st.cats[i.cat].clone()).unwrap_or_else(|| "IMPULSE".into());
+                    fit_txt(&painter, pos2(tail.left() + 16.0, tail.top() + 56.0), &clean_name(&name).to_uppercase(), disp(15.0), hi, 2.0, tail.width() - 32.0);
+                    txt(&painter, pos2(tail.left() + 16.0, tail.top() + 72.0), Align2::LEFT_BOTTOM, format!("{cat}  ·  {}", if p.reverse.value() { "REVERSED" } else { "FORWARD" }), mono(9.0), dim_txt, 1.0);
+                    draw_tail_ir(&painter, skin, wave, &env, secs, rt1, p.freeze.value());
+                    let sub = if loading {
+                        "LOADING...".to_string()
+                    } else if let Some(e) = err {
+                        e
+                    } else if (rt1 - rt0).abs() > 0.005 {
+                        format!("DECAY {rt0:.2} s  ›  {rt1:.2} s     TAIL {secs:.1} s")
+                    } else {
+                        format!("DECAY {rt0:.2} s     TAIL {secs:.1} s")
+                    };
+                    txt(&painter, pos2(tail.left() + 16.0, tail.top() + 238.0), Align2::LEFT_BOTTOM, sub, mono(10.0), rgb(0xcd, 0xef, 0xff), 1.0);
+                    let list = visible(st);
+                    let idx = list.iter().position(|&i| st.items[i].key == current);
+                    let step = |d: isize| -> Option<PathBuf> {
+                        if list.is_empty() {
+                            return None;
+                        }
+                        let n = list.len() as isize;
+                        let i = idx.map(|i| (i as isize + d).rem_euclid(n)).unwrap_or(0) as usize;
+                        Some(st.items[list[i]].path.clone())
+                    };
+                    let mut go = None;
+                    if skin.chip(ui, Rect::from_min_size(pos2(tail.left() + 16.0, by), vec2(64.0, 18.0)), "‹ PREV", false, "prev").clicked() {
+                        go = step(-1);
+                    }
+                    if skin.chip(ui, Rect::from_min_size(pos2(tail.left() + 86.0, by), vec2(64.0, 18.0)), "NEXT ›", false, "next").clicked() {
+                        go = step(1);
+                    }
+                    // Arrow keys step too (when not typing in the search box).
+                    if !ctx.wants_keyboard_input() {
+                        if ui.input(|i| i.key_pressed(Key::ArrowDown) || i.key_pressed(Key::ArrowRight)) {
+                            go = step(1);
+                        } else if ui.input(|i| i.key_pressed(Key::ArrowUp) || i.key_pressed(Key::ArrowLeft)) {
+                            go = step(-1);
+                        }
+                    }
+                    if let Some(f) = go {
+                        load(&f);
+                    }
+                    skin.chip_param(ui, setter, Rect::from_min_size(pos2(tail.left() + 156.0, by), vec2(110.0, 18.0)), &p.reverse, ("REVERSE: ON", "REVERSE: OFF"));
+                } else {
+                    let mode = p.algo_mode.value().clamp(0, 11) as usize;
+                    let color = COLOR_NAMES[p.algo_color.value().clamp(0, 2) as usize];
+                    txt(&painter, pos2(tail.left() + 16.0, tail.top() + 56.0), Align2::LEFT_BOTTOM, MODE_NAMES[mode], disp(15.0), hi, 2.0);
+                    fit_txt(&painter, pos2(tail.left() + 16.0, tail.top() + 72.0), &format!("{color}  ·  ALGO ENGINE  ·  {}", MODE_INFO[mode].to_uppercase()), mono(9.0), dim_txt, 1.0, tail.width() - 32.0);
+                    draw_tail_algo(&painter, skin, wave, p, mode == 11);
+                    txt(&painter, pos2(tail.left() + 16.0, tail.top() + 238.0), Align2::LEFT_BOTTOM, format!("DECAY {:.2} s     PRE-DELAY {:.0} ms", p.decay.value(), p.predelay.value()), mono(10.0), rgb(0xcd, 0xef, 0xff), 1.0);
+                    if skin.chip(ui, Rect::from_min_size(pos2(tail.left() + 16.0, by), vec2(64.0, 18.0)), "‹ PREV", false, "aprev").clicked() {
+                        set_int(setter, &p.algo_mode, ((mode + 11) % 12) as i32);
+                    }
+                    if skin.chip(ui, Rect::from_min_size(pos2(tail.left() + 86.0, by), vec2(64.0, 18.0)), "NEXT ›", false, "anext").clicked() {
+                        set_int(setter, &p.algo_mode, ((mode + 1) % 12) as i32);
+                    }
+                }
+                freeze_button(ui, setter, Rect::from_min_size(pos2(tail.right() - 138.0, tail.top() + 226.0), vec2(126.0, 40.0)), &p.freeze);
+
+                // ---- SEC.03: WHERE IT HITS ----
+                let spec = Rect::from_min_max(pos2(l + 16.0, t + 298.0), pos2(mr, t + 448.0));
+                let duck_db = f32::from_bits(shared.duck_db.load(Ordering::Relaxed));
+                draw_spectrum(&painter, skin, spec, st, p, duck_db, sr);
+
+                // ---- METERS ----
+                let mp = Rect::from_min_max(pos2(mr + 12.0, spec.top()), pos2(r - 16.0, t + 756.0));
+                skin.panel(&painter, mp, "", "");
+                let m = &shared.meters;
+                let (my, mh) = (mp.top() + 40.0, mp.height() - 66.0);
+                skin.meter(&painter, mp.left() + 9.0, my, mh, "IN", m.db(0), m.db(1), Side::Right, "in");
+                skin.meter(&painter, mp.left() + 49.0, my, mh, "OUT", m.db(2), m.db(3), Side::None, "out");
+
+                // ---- SEC.04 SPACE | SEC.05 DUCK ----
+                let space_r = Rect::from_min_max(pos2(l + 16.0, t + 460.0), pos2(l + 540.0, t + 580.0));
+                skin.panel(&painter, space_r, "SPACE", "SEC.04");
+                let ky = space_r.top() + 62.0;
+                let sx = |r: Rect, n: usize, i: usize| r.left() + r.width() * (i as f32 + 0.5) / n as f32;
+                let space: [(&str, &FloatParam, bool); 5] = [("LENGTH", &p.length, algo), ("SIZE", &p.size, false), ("DECAY", &p.decay, false), ("PRE-DELAY", &p.predelay, false), ("WIDTH", &p.width, false)];
+                for (i, (lab_, prm, dim)) in space.iter().enumerate() {
+                    skin.knob(ui, setter, pos2(sx(space_r, 5, i), ky), 20.0, lab_, *prm, false, false, *dim);
+                }
+                if !algo {
+                    skin.chip_param(ui, setter, Rect::from_min_size(pos2(space_r.left() + 94.0, space_r.top() + 6.0), vec2(158.0, 18.0)), &p.decay_orig, ("DECAY: IMPULSE'S OWN", "DECAY: SET BY KNOB"));
+                }
+                // Pre-delay tempo sync (cycles OFF, 1/64 ... 1/4D).
+                let pd = p.pre_div.value().clamp(0, 8);
+                if skin.chip(ui, Rect::from_min_size(pos2(space_r.left() + 260.0, space_r.top() + 6.0), vec2(128.0, 18.0)), &format!("PRE SYNC: {} ›", PRE_DIVS[pd as usize]), pd != 0, "prediv").clicked() {
+                    set_int(setter, &p.pre_div, (pd + 1) % 9);
+                }
+                let duck_r = Rect::from_min_max(pos2(space_r.right() + 12.0, space_r.top()), pos2(mr, space_r.bottom()));
+                skin.panel(&painter, duck_r, "DUCK", "SEC.05");
+                let duck: [(&str, &FloatParam); 3] = [("DUCK", &p.duck), ("DUCK LOW", &p.duck_lo), ("DUCK HIGH", &p.duck_hi)];
+                for (i, (lab_, prm)) in duck.iter().enumerate() {
+                    skin.knob(ui, setter, pos2(sx(duck_r, 3, i), ky), 20.0, lab_, *prm, false, false, false);
+                }
+                let src = p.duck_src.value().clamp(0, 2);
+                if skin.chip(ui, Rect::from_min_size(pos2(duck_r.left() + 76.0, duck_r.top() + 6.0), vec2(124.0, 18.0)), &format!("HEARS: {} ›", DUCK_SOURCES[src as usize]), src != 0, "ducksrc").clicked() {
+                    set_int(setter, &p.duck_src, (src + 1) % 3);
+                }
+
+                // ---- SEC.06 EXTRAS: tabbed row ----
+                let ex = Rect::from_min_max(pos2(l + 16.0, t + 592.0), pos2(mr, t + 756.0));
+                skin.panel(&painter, ex, "EXTRAS", "");
+                let ey = ex.top() + 82.0;
+                let tabs = ["ALGO", "SHIMMER", "RISER + SWELL", "INPUT EQ"];
+                for (i, tname) in tabs.iter().enumerate() {
+                    let cr = Rect::from_min_size(pos2(ex.left() + 94.0 + i as f32 * 124.0, ex.top() + 6.0), vec2(118.0, 20.0));
+                    if skin.chip(ui, cr, tname, st.extra_tab == i, ("xtab", i)).clicked() {
+                        st.extra_tab = i;
+                    }
+                    let lit = match i {
+                        1 => p.shimmer.value() > 0.0,
+                        2 => p.riser.value() > 0.0 || p.swell.value(),
+                        3 => p.in_lo.value() > LOW_CUT_OFF || p.in_hi.value() < HIGH_CUT_OFF,
+                        _ => algo,
+                    };
+                    if lit {
+                        painter.circle_filled(cr.right_top() + vec2(-6.0, 6.0), 4.5, al(ACC, 0.25));
+                        painter.circle_filled(cr.right_top() + vec2(-6.0, 6.0), 2.2, ACC);
+                    }
+                }
+                let wide = |i: usize| ex.left() + 70.0 + i as f32 * 140.0;
+                match st.extra_tab {
+                    0 => {
+                        let ak: [(&str, &FloatParam); 9] = [
+                            ("ATTACK", &p.attack),
+                            ("EARLY DIFF", &p.early_diff),
+                            ("LATE DIFF", &p.late_diff),
+                            ("MOD RATE", &p.mod_rate),
+                            ("MOD DEPTH", &p.mod_depth),
+                            ("BASS MULT", &p.bass_mult),
+                            ("BASS XOVER", &p.bass_xover),
+                            ("HIGH SHELF", &p.high_shelf),
+                            ("HIGH FREQ", &p.high_freq),
+                        ];
+                        for (i, (lab_, prm)) in ak.iter().enumerate() {
+                            skin.knob(ui, setter, pos2(sx(ex, 9, i), ey), 18.0, lab_, *prm, false, false, !algo);
+                        }
+                        if !algo {
+                            skin.small(&painter, pos2(ex.right() - 14.0, ex.top() + 16.0), Align2::RIGHT_CENTER, "ALGO ENGINE ONLY · ALGO TAB, TOP LEFT", skin.text_faint());
+                        }
+                    }
+                    1 => {
+                        let k: [(&str, &FloatParam); 4] = [("SHIMMER", &p.shimmer), ("PITCH", &p.shim_pitch), ("FEEDBACK", &p.shim_fb), ("TONE", &p.shim_tone)];
+                        for (i, (lab_, prm)) in k.iter().enumerate() {
+                            skin.knob(ui, setter, pos2(wide(i), ey), 18.0, lab_, *prm, false, false, false);
+                        }
+                    }
+                    2 => {
+                        let k: [(&str, &FloatParam); 5] = [("RISER", &p.riser), ("SWELL LENGTH", &p.swell_len), ("SWELL LEVEL", &p.swell_amt), ("SENSITIVITY", &p.swell_sens), ("CURVE", &p.swell_curve)];
+                        let swell = p.swell.value();
+                        for (i, (lab_, prm)) in k.iter().enumerate() {
+                            skin.knob(ui, setter, pos2(wide(i), ey), 18.0, lab_, *prm, false, false, i > 0 && !swell);
+                        }
+                        let pdc = swell_lookahead(sr) as f32 / sr;
+                        skin.chip_param(ui, setter, Rect::from_min_size(pos2(ex.right() - 202.0, ex.top() + 6.0), vec2(190.0, 20.0)), &p.swell, (&format!("SWELL: ON (+{pdc:.1} s PDC)"), "SWELL: OFF"));
+                    }
+                    _ => {
+                        let k: [(&str, &FloatParam); 2] = [("INPUT LOW CUT", &p.in_lo), ("INPUT HIGH CUT", &p.in_hi)];
+                        for (i, (lab_, prm)) in k.iter().enumerate() {
+                            skin.knob(ui, setter, pos2(wide(i), ey), 18.0, lab_, *prm, false, false, false);
+                        }
+                        let nx = ex.left() + 370.0;
+                        let c = rgb(0xcd, 0xef, 0xff);
+                        let d = al(rgb(0x8f, 0xc9, 0xe3), 0.75);
+                        txt(&painter, pos2(nx, ey - 26.0), Align2::LEFT_CENTER, "SHAPES WHAT GOES INTO THE REVERB", disp(8.5), c, 2.0);
+                        skin.small(&painter, pos2(nx, ey - 4.0), Align2::LEFT_CENTER, "Cut lows going in = no mud building up in the tail.", d);
+                        skin.small(&painter, pos2(nx, ey + 12.0), Align2::LEFT_CENTER, "Cut highs going in = no harsh esses or hats in the tail.", d);
+                        skin.small(&painter, pos2(nx, ey + 28.0), Align2::LEFT_CENTER, "LOW/HIGH CUT in MIX shape what comes out.", d);
+                    }
+                }
+
+                // ---- SEC.07 MIX ----
+                let mix_r = Rect::from_min_max(pos2(l + 16.0, t + 768.0), pos2(r - 16.0, foot.top() - 10.0));
+                skin.panel(&painter, mix_r, "MIX", "SEC.07");
+                let mx: [(&str, &FloatParam, bool); 5] = [
+                    (if send_on { "DRY (LOCKED)" } else { "DRY" }, &p.dry, send_on),
+                    ("WET", &p.wet, false),
+                    ("LOW CUT", &p.low_cut, false),
+                    ("HIGH CUT", &p.high_cut, false),
+                    (if send_on { "OUTPUT (REVERB)" } else { "OUTPUT" }, &p.output, false),
+                ];
+                let mky = mix_r.top() + 56.0;
+                for (i, (lab_, prm, dim)) in mx.iter().enumerate() {
+                    skin.knob(ui, setter, pos2(sx(mix_r, 5, i), mky), 26.0, lab_, *prm, true, false, *dim);
+                }
+
+                // ---- footer ----
+                let lat = BLOCK + if p.swell.value() { swell_lookahead(sr) } else { 0 };
+                skin.footer(&painter, foot, foot.left() + 300.0);
+                skin.safe_chip(ui, setter, Rect::from_center_size(pos2(foot.left() + 226.0, foot.center().y), vec2(112.0, 18.0)), &p.safe, shared.meters.db(4));
+                skin.small(&painter, pos2(foot.left() + 16.0, foot.center().y), Align2::LEFT_CENTER, format!("PDC {lat} SMP · {:.0} ms", lat as f32 / sr * 1000.0), rgb(0x9f, 0xdc, 0xf5));
+            });
+        }
+
+#[cfg(test)]
+mod shot_tests {
+    use super::*;
+    use crate::shot::*;
+    use std::collections::HashMap;
+    /// SHOT_DIR=/src/target/shots cargo test --lib screenshots  ->  alleyverb0.rgb
+    #[test]
+    fn screenshots() {
+        let Ok(dir) = std::env::var("SHOT_DIR") else { return };
+        let plug = crate::AlleyVerb::default();
+        let (params, shared) = (plug.params.clone(), plug.shared.clone());
+        let fft = RealFftPlanner::<f32>::new().plan_fft_forward(FFT);
+    let ui_state = Ui {
+        cats: Vec::new(),
+        items: Vec::new(),
+        favs: BTreeSet::new(),
+        scanned: false,
+        cat: 0,
+        search: String::new(),
+        presets: PresetBar::new("AlleyVerb"),
+        extra_tab: 0,
+        spec: fft.make_output_vec(),
+        fft,
+        ring_wet: vec![0.0; FFT],
+        ring_dry: vec![0.0; FFT],
+        pos: 0,
+        tbuf: vec![0.0; FFT],
+        wet_db: vec![-120.0; SPEC_POINTS],
+        dry_db: vec![-120.0; SPEC_POINTS],
+    };
+    let skin = Skin::new(Look::Hud, ACC, "ALLEYVERB", env!("CARGO_PKG_VERSION"), "IMPULSE + ALGO // FREEZE // SHIMMER // RISER + SWELL // DUCK");
+        let mut state = (ui_state, skin);
+        let loader = Loader::new(params.clone(), shared.clone());
+        let ctx = egui::Context::default();
+        install_fonts(&ctx);
+        let mock = Mock;
+        let setter = ParamSetter::new(&mock);
+        let mut texs = HashMap::new();
+        let mut out = None;
+        for i in 0..4 {
+            out = Some(ctx.run(raw(i, vec![]), |c| frame(c, &setter, &mut state, &params, &shared, &loader)));
+            if i < 3 { apply_delta(&mut texs, out.as_ref().unwrap()); }
+        }
+        render(&ctx, out.unwrap(), &mut texs, &format!("{dir}/alleyverb0.rgb"));
+    }
 }

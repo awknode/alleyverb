@@ -2,6 +2,8 @@
 
 **Convolution and algorithmic reverb with an impulse browser, FREEZE and a live "where it hits" view.**
 
+![ALLEYVERB](docs/images/screenshot.png)
+
 ALLEYVERB loads your impulse responses (WAV) or runs 12 built-in algorithms. THE TAIL shows the decay with the RT60 marked, and WHERE IT HITS shows the reverb's spectrum over the dry, so you can see where the space is building up.
 
 ## Features
