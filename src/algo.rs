@@ -82,7 +82,13 @@ const MAX_MOD_MS: f32 = 6.0;
 /// Overall level, matched to the impulse engine's loudness.
 const OUT_GAIN: f32 = 1.45;
 /// Per-mode level trims (dB) so flipping modes doesn't jump in loudness.
-const TRIM_DB: [f32; 12] = [0.0, 0.2, -1.6, -2.0, -0.7, 2.2, -0.4, 0.9, 0.5, 1.8, -0.4, -3.7];
+/// 0.7.0: every measured mode brought to ValhallaVintageVerb's Concert Hall level (awk-bench 2026-11-22,
+/// average of noise + 1 kHz bursts), still level with each other; WARP / LO-FI / GATED moved by the average.
+const TRIM_DB: [f32; 12] = [3.0, 2.2, -1.8, 0.6, 1.8, 5.1, 5.3, 2.8, 3.1, 4.4, 2.2, -1.1];
+/// 0.6.1 trims, so the shimmer tank (a feedback loop) can take the 0.7.0 level change back out.
+const TRIM_DB_061: [f32; 12] = [0.0, 0.2, -1.6, -2.0, -0.7, 2.2, -0.4, 0.9, 0.5, 1.8, -0.4, -3.7];
+/// VINTAGE / 80s read quieter once darker; level them with NOW.
+const COLOR_TRIM_DB: [f32; 3] = [2.0, 0.8, 0.0];
 
 pub struct AlgoParams {
     pub mode: usize,
@@ -152,7 +158,9 @@ impl Ap {
     }
     #[inline]
     fn tick(&mut self, x: f32, len: f32, g: f32) -> f32 {
-        let dl = self.d.read(len);
+        // whole samples: a fractional (linear) read is a low-pass inside the loop on every pass,
+        // which darkened the small modes most (ROOM / CHAMBER / AMBIENCE go round most often)
+        let dl = self.d.tap(len.round().max(1.0) as usize);
         let v = x + g * dl;
         self.d.push(v);
         dl - g * v
@@ -195,6 +203,9 @@ pub struct Algo {
     bw_in: [OnePole; 2],
     bw_out: [OnePole; 2],
     len_s: [f32; 8],
+    /// allpass-interpolator state per tank line (flat magnitude; a linear read at a moving
+    /// fraction low-passes every pass and made every mode dark: ~6.6 kHz vs VintageVerb's ~9.3 kHz)
+    ap_y: [f32; 8],
     lfo: [f32; 8],
     rnd_cur: [f32; 8],
     rnd_tgt: [f32; 8],
@@ -225,6 +236,8 @@ pub struct Algo {
     er_level: f32,
     gate_len: f32,
     out_gain: f32,
+    /// multiply the output by this for 0.6.1's level (used inside feedback loops)
+    pub lvl_061: f32,
 }
 
 impl Algo {
@@ -245,6 +258,7 @@ impl Algo {
             bw_in: [OnePole::default(); 2],
             bw_out: [OnePole::default(); 2],
             len_s: [0.0; 8],
+            ap_y: [0.0; 8],
             lfo: [0.0, 0.13, 0.29, 0.41, 0.57, 0.66, 0.78, 0.91],
             rnd_cur: [0.0; 8],
             rnd_tgt: [0.0; 8],
@@ -274,6 +288,7 @@ impl Algo {
             er_level: 0.0,
             gate_len: 0.0,
             out_gain: OUT_GAIN,
+            lvl_061: 1.0,
         };
         a.set(&AlgoParams {
             mode: 0,
@@ -303,7 +318,8 @@ impl Algo {
         let rt = if def.gated { 3.0 } else { p.decay.clamp(0.05, 60.0) };
         let color_hf = [1.5, 1.2, 1.0][p.color.min(2)];
         let color_mod = [1.4, 1.15, 1.0][p.color.min(2)];
-        let color_bw = [7000.0, 11000.0, 20000.0][p.color.min(2)];
+        // 0.7.0: VINTAGE / 80s / NOW set against VintageVerb 70s / 80s / now (tails ~5.1 / ~8.3 / ~9.3 kHz)
+        let color_bw = [3200.0, 7000.0, 10000.0][p.color.min(2)];
         for k in 0..8 {
             let len = LINE_MS[k] * scale * 0.001 * sr;
             self.target_len[k] = len;
@@ -346,7 +362,8 @@ impl Algo {
         }
         self.er_level = def.er * (1.0 - 0.6 * p.attack);
         self.gate_len = p.decay.clamp(0.05, 5.0) * sr;
-        self.out_gain = OUT_GAIN * 10f32.powf(TRIM_DB[p.mode.min(11)] / 20.0);
+        self.out_gain = OUT_GAIN * 10f32.powf((TRIM_DB[p.mode.min(11)] + COLOR_TRIM_DB[p.color.min(2)]) / 20.0);
+        self.lvl_061 = 10f32.powf((TRIM_DB_061[p.mode.min(11)] - TRIM_DB[p.mode.min(11)] - COLOR_TRIM_DB[p.color.min(2)]) / 20.0);
     }
 
     pub fn clear(&mut self) {
@@ -360,6 +377,7 @@ impl Algo {
         self.hs = [OnePole::default(); 8];
         self.gate = 0.0;
         self.gate_hold = 0.0;
+        self.ap_y = [0.0; 8];
     }
 
     #[inline]
@@ -417,7 +435,13 @@ impl Algo {
             } else {
                 fsin(self.lfo[k])
             };
-            o[k] = self.lines[k].read(self.len_s[k] + self.mod_s * (1.0 + mv));
+            let d = self.len_s[k] + self.mod_s * (1.0 + mv);
+            let n = (d - 0.5).floor().max(1.0);
+            let fr = d - n;
+            let a = (1.0 - fr) / (1.0 + fr);
+            let v = a * self.lines[k].tap(n as usize) + self.lines[k].tap(n as usize + 1) - a * self.ap_y[k];
+            self.ap_y[k] = v;
+            o[k] = v;
         }
         // Hadamard 8 (orthogonal after /sqrt(8)).
         let mut mx = o;
@@ -554,5 +578,54 @@ mod tests {
             bad += (!(e > crate::wav::TARGET_ENERGY * 0.25 && e < crate::wav::TARGET_ENERGY * 4.0)) as usize;
         }
         assert_eq!(bad, 0);
+    }
+}
+
+/// ALGO_REPORT=1: per mode / colour, tail level and centroid of a noise burst with the tone controls flat
+/// (same settings as awk-bench gen_alley.py), for matching against ValhallaVintageVerb.
+#[cfg(test)]
+mod algo_report {
+    use super::*;
+    fn run(mode: usize, color: usize) -> (f32, f32) {
+        let sr = 48000.0f32;
+        let mut a = Algo::new(sr);
+        let p = AlgoParams { mode, color, decay: 2.0, size: 1.0, attack: 0.5, early_diff: 1.0, late_diff: 1.0, mod_rate: 0.5, mod_depth: 0.3,
+            bass_mult: 1.0, bass_xover: 400.0, high_shelf_db: 0.0, high_freq: 6000.0 };
+        a.set(&p);
+        a.len_s = a.target_len;
+        let mut s = 99u32;
+        let (b0, b1) = (24000usize, 24480usize);
+        let n = 96000;
+        let mut l = vec![0.0f32; n];
+        let mut e_in = 0.0f32;
+        for i in 0..n {
+            let x = if i >= b0 && i < b1 { s = s.wrapping_mul(1664525).wrapping_add(1013904223); 0.25 * ((s >> 8) as f32 / 8388608.0 - 1.0) } else { 0.0 };
+            e_in += x * x;
+            if i % 64 == 0 { a.set(&p); }
+            let (y, z) = a.tick(x, x);
+            l[i] = 0.5 * (y * y + z * z);
+            l[i] = l[i].sqrt() * y.signum();
+            if i >= b1 { l[i] = y; } else { l[i] = 0.0; }
+            let _ = z;
+        }
+        let seg = &l[b1 + 4800..b1 + 48000];
+        let (mut num, mut den) = (0.0f64, 0.0f64);
+        for f in seg.chunks(2048).filter(|c| c.len() == 2048) {
+            for k in 1..1024 {
+                let w = std::f64::consts::TAU * k as f64 / 2048.0;
+                let (mut re, mut im) = (0.0f64, 0.0f64);
+                for (j, v) in f.iter().enumerate() { let h = 0.5 - 0.5 * (std::f64::consts::TAU * j as f64 / 2047.0).cos(); re += *v as f64 * h * (w * j as f64).cos(); im -= *v as f64 * h * (w * j as f64).sin(); }
+                let m = (re * re + im * im).sqrt();
+                num += m * k as f64 * sr as f64 / 2048.0; den += m;
+            }
+        }
+        let e_out: f32 = l[b1..b1 + 48000].iter().map(|v| v * v).sum();
+        (10.0 * (e_out / e_in).log10(), (num / den.max(1e-12)) as f32)
+    }
+    #[test]
+    fn algo_report() {
+        if std::env::var("ALGO_REPORT").is_err() { return; }
+        for m in 0..8 { let (lv, c) = run(m, 2); println!("{:13} NOW: tail {lv:+5.1} dB, centroid {c:5.0} Hz", MODE_NAMES[m]); }
+        for c in 0..3 { let (lv, ce) = run(0, c); println!("HALL {:8}: tail {lv:+5.1} dB, centroid {ce:5.0} Hz", COLOR_NAMES[c]); }
     }
 }

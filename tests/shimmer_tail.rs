@@ -24,19 +24,23 @@ fn tail_db(fb: f32, ratio: f32, hann: bool, hp: bool) -> Vec<f32> {
         let mut pr = lp[1].tick(ps[1].tick(ir, ratio));
         if hp { pl = hpf[0].tick(pl); pr = hpf[1].tick(pr); }
         prev = t.tick(pl, pr);
+        prev = (prev.0 * t.lvl_061, prev.1 * t.lvl_061);
         pk = pk.max(prev.0.abs());
         if n % 48000 == 47999 { out.push(20.0 * pk.max(1e-9).log10()); pk = 0.0; }
     }
     out
 }
 
-/// Fixed loop: dead silent (under -90 dB) within 8 s after the input stops, even at max feedback.
+/// Fixed loop: dead silent (under -90 dB) within 9 s after the input stops, even at max feedback.
+/// (0.7.0: was 8 s; the tank no longer loses highs on every pass, so max-feedback octave-down
+/// shimmer reaches -88 dB at 8 s and -102 dB at 9 s, still falling ~12 dB/s. The loop uses the
+/// tank at 0.6.1's level, like the plugin does.)
 #[test]
 fn shimmer_dies_away() {
     for fb in [0.425f32, 0.85] {
         for ratio in [0.5f32, 2.0, 4.0] {
             let v = tail_db(fb, ratio, true, true);
-            assert!(v[8] < -90.0, "fb {fb} ratio {ratio}: {:?}", v);
+            assert!(v[9] < -90.0, "fb {fb} ratio {ratio}: {:?}", v);
         }
     }
 }

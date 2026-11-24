@@ -234,6 +234,9 @@ pub struct AlleyParams {
     /// Header power button (also the host's bypass).
     #[id = "bypass"]
     pub bypass: BoolParam,
+    /// Window size (1.0 = 100%), saved with the project. 0 = not set: open at the default.
+    #[persist = "ui-scale"]
+    pub ui_scale: Arc<std::sync::RwLock<f32>>,
     /// SAFE: output limiter at -0.1 dBFS (footer switch, on by default).
     #[id = "safe"]
     pub safe: BoolParam,
@@ -361,6 +364,7 @@ impl Default for AlleyParams {
             mix: awk_ui::mix_param(),
             safe: awk_ui::safe_param(),
             bypass: awk_ui::bypass_param(),
+            ui_scale: Arc::new(std::sync::RwLock::new(0.0)),
         }
     }
 }
@@ -895,6 +899,8 @@ impl Plugin for AlleyVerb {
                     let pl = self.shim_hp[0].tick(self.shim_lp[0].tick(ps[0].tick(il, shim_ratio)));
                     let pr = self.shim_hp[1].tick(self.shim_lp[1].tick(ps[1].tick(ir, shim_ratio)));
                     let (sl, sr2) = t.tick(pl, pr);
+                    // 0.7.0 raised the tank level; the shimmer loop keeps 0.6.1's gain (same sustain, same level)
+                    let (sl, sr2) = (sl * t.lvl_061, sr2 * t.lvl_061);
                     self.shim_prev = (sl, sr2);
                     wl += sl * shim_amt;
                     wr += sr2 * shim_amt;

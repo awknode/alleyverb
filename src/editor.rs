@@ -234,6 +234,7 @@ pub fn create(params: Arc<AlleyParams>, shared: Arc<Shared>) -> Option<crate::ni
     let skin = Skin::new(Look::Hud, ACC, "ALLEYVERB", env!("CARGO_PKG_VERSION"), "IMPULSE + ALGO // FREEZE // SHIMMER // RISER + SWELL // DUCK");
     // Owned by the update closure below, so it lives exactly as long as the editor.
     let loader = Loader::new(params.clone(), shared.clone());
+    crate::presets::apply_scale(&state, &params.ui_scale);
     create_egui_editor(state, nice_plug_egui::RepaintNotifier::new(), nice_plug_egui::EguiNiceSettings::default(), crate::nice_app::AwkApp::new(install_fonts, {
         let mut __st = (ui_state, skin);
         Box::new(move |ctx: &mut egui::Ui, setter: &ParamSetter| {
@@ -658,7 +659,7 @@ fn frame(root: &mut egui::Ui, setter: &ParamSetter, state: &mut (Ui, Skin), para
             egui::CentralPanel::default().frame(egui::Frame::NONE.fill(rgb(0x04, 0x07, 0x0c))).show(root, |ui| {
                 let whole = ui.max_rect();
                 skin.background(ui.painter(), whole);
-                let full = st.presets.strip(ui, setter, params.as_ref(), whole, skin, &p.mix, &p.bypass);
+                let full = st.presets.strip(ui, setter, params.as_ref(), whole, skin, &p.mix, &p.bypass, &p.ui_scale);
                 if let Some(fields) = st.presets.pending_fields.take() {
                     if let Some(path) = fields.get("ir-path").and_then(|j| serde_json::from_str::<String>(j).ok()) {
                         if !path.is_empty() && path != current {
